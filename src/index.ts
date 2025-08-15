@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { Command } from 'commander';
 import { spawn } from 'node:child_process';
 import ffprobeStatic from 'ffprobe-static';
 import ffmpegPathDefault from 'ffmpeg-static';
@@ -30,6 +31,8 @@ export interface TrimResult {
 }
 
 const SUPPORTED_EXTS = new Set(['.mp3', '.wav', '.ogg']);
+
+// ---------------- core helpers ----------------
 
 function run(cmd: string, args: string[], opts: { cwd?: string } = {}): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
@@ -122,6 +125,8 @@ function codecArgsFor(ext: string, info: { bitrateKbps: number | null; bitsPerSa
   return ['-c:a', 'pcm_s16le'];
 }
 
+// ---------------- public API ----------------
+
 export async function trimFile(inputPath: string, options: TrimOptions = {}): Promise<TrimResult> {
   const {
     thresholdDb = -45,
@@ -213,156 +218,118 @@ export async function trimDirectory(dir: string, options: TrimOptions = {}): Pro
   return results;
 }
 
-/** CLI support (used by src/bin/cli.ts) */
+// ---------------- Commander CLI ----------------
+
+async function getPackageVersion(): Promise<string> {
+  try {
+    const pkgRaw = await fs.readFile(new URL('../package.json', import.meta.url), 'utf8');
+    const pkg = JSON.parse(pkgRaw);
+    return pkg.version ?? '0.0.0';
+  } catch {
+    return '0.0.0';
+  }
+}
+
+/** CLI entry used by src/bin/cli.ts */
 export async function runCli(): Promise<void> {
-  const flags = parseCliArgs(process.argv.slice(2));
+  const program = new Command();
 
-  if (flags.version) {
-    try {
-      const pkgRaw = await fs.readFile(new URL('../package.json', import.meta.url), 'utf8');
-      const pkg = JSON.parse(pkgRaw);
-      console.log(pkg.version);
-    } catch {
-      console.log('0.0.0');
-    }
-    return;
-  }
-
-  if (flags.help || (!flags.all && !flags.fileArg)) {
-    printHelp();
-    if (!flags.help) process.exitCode = 1;
-    return;
-  }
-
-  const options: TrimOptions = {
-    thresholdDb: flags.thresholdDb,
-    startSeconds: flags.startSeconds,
-    stopSeconds: flags.stopSeconds,
-    inPlace: flags.inPlace,
-    noBackup: flags.noBackup,
-    suffix: flags.suffix,
-    verbose: flags.verbose
-  };
-
-  if (flags.all) {
-    const entries = await fs.readdir(process.cwd());
-    const targets = entries
-      .filter(f => SUPPORTED_EXTS.has(path.extname(f).toLowerCase()))
-      .map(f => path.join(process.cwd(), f));
-
-    if (targets.length === 0) {
-      console.log('No .mp3, .wav, or .ogg files found in current directory.');
-      return;
-    }
-
-    console.log(`Trimming silence from ${targets.length} file${targets.length === 1 ? '' : 's'}`);
-    console.log(
-      `threshold=${options.thresholdDb}dB, start>=${options.startSeconds}s, stop>=${options.stopSeconds}s` +
-      (options.inPlace ? `, mode=in-place${options.noBackup ? ', no-backup' : ', with-backup'}` : `, suffix='${options.suffix}'`)
-    );
-
-    let ok = 0, err = 0, skipped = 0;
-    for (const t of targets) {
-      const res = await trimFile(t, options);
-      const base = path.basename(t);
-      if (res.status === 'ok') {
-        ok++;
-        if (options.inPlace) console.log(`✓ ${base} (trimmed in-place)`);
-        else {
-          const p = path.parse(base);
-          console.log(`✓ ${base} -> ${p.name}${options.suffix}${p.ext}`);
-        }
-      } else if (res.status === 'skipped') {
-        skipped++;
-      } else {
-        err++;
-        console.error(`✗ ${base}`);
-      }
-    }
-
-    console.log(`\nDone. ok=${ok}, errors=${err}, skipped=${skipped}`);
-    if (options.inPlace && !options.noBackup) {
-      console.log('Backups created with .bak suffix next to originals.');
-    }
-  } else {
-    const input = path.resolve(flags.fileArg as string);
-    const res = await trimFile(input, options);
-    if (res.status === 'ok') {
-      if (options.inPlace) console.log(`✓ Trimmed in-place: ${input}`);
-      else console.log(`✓ Wrote: ${res.outputPath}`);
-    } else if (res.status === 'skipped') {
-      console.log('Nothing to do.');
-      process.exitCode = 2;
-    } else {
-      console.error('Failed.');
-      process.exitCode = 3;
-    }
-  }
-}
-
-function parseCliArgs(argv: string[]) {
-  const flags: any = {
-    all: false,
-    inPlace: false,
-    noBackup: false,
-    thresholdDb: -45,
-    startSeconds: 0.05,
-    stopSeconds: 0.20,
-    suffix: '_trimmed',
-    verbose: false,
-    fileArg: null,
-    help: false,
-    version: false
-  };
-
-  for (let i = 0; i < argv.length; i++) {
-    const a = argv[i];
-    if (a === '--help' || a === '-h') flags.help = true;
-    else if (a === '--version' || a === '-v') flags.version = true;
-    else if (a === '--all') flags.all = true;
-    else if (a === '--in-place') flags.inPlace = true;
-    else if (a === '--no-backup') flags.noBackup = true;
-    else if (a === '--verbose') flags.verbose = true;
-    else if (a === '--threshold') flags.thresholdDb = parseFloat(argv[++i]);
-    else if (a.startsWith('--threshold=')) flags.thresholdDb = parseFloat(a.split('=')[1]);
-    else if (a === '--start') flags.startSeconds = parseFloat(argv[++i]);
-    else if (a.startsWith('--start=')) flags.startSeconds = parseFloat(a.split('=')[1]);
-    else if (a === '--stop') flags.stopSeconds = parseFloat(argv[++i]);
-    else if (a.startsWith('--stop=')) flags.stopSeconds = parseFloat(a.split('=')[1]);
-    else if (a === '--suffix') flags.suffix = argv[++i];
-    else if (!a.startsWith('--') && !flags.fileArg) flags.fileArg = a;
-  }
-  return flags;
-}
-
-function printHelp() {
-  console.log(`
-audio-trim-silence — Trim leading/trailing silence from MP3, WAV, and OGG files
-
-Usage:
-  audio-trim-silence "file.mp3"
-  audio-trim-silence "file.wav"
-  audio-trim-silence "file.ogg"
-  audio-trim-silence --all
-  audio-trim-silence --all --in-place [--no-backup]
-  audio-trim-silence "file.mp3" --threshold -45 --start 0.05 --stop 0.20
-
-Options:
-  --all            Process all .mp3/.wav/.ogg files in current directory
-  --in-place       Overwrite originals (creates .bak backup unless --no-backup)
-  --no-backup      Skip creating .bak when using --in-place
-  --threshold N    Silence threshold in dB (negative). Default: -45
-  --start SEC      Min leading silence to trim (seconds). Default: 0.05
-  --stop SEC       Min trailing silence to trim (seconds). Default: 0.20
-  --suffix TEXT    Suffix for outputs when not in-place. Default: _trimmed
-  --verbose        Verbose logging
-  -h, --help       Show this help
-  -v, --version    Print version
-
+  program
+    .name('mp3-trim-silence') // keep this aligned with your package.json "bin" name
+    .description('Trim leading/trailing silence from MP3, WAV, and OGG files using FFmpeg.')
+    .version(await getPackageVersion(), '-v, --version', 'output the current version')
+    .argument('[file]', 'Path to a single .mp3/.wav/.ogg file to process')
+    .option('--all', 'Process all supported files in the current directory')
+    .option('--in-place', 'Overwrite originals (creates .bak backup unless --no-backup is set)')
+    .option('--no-backup', 'Skip creating .bak when using --in-place')
+    .option('--threshold <db>', 'Silence threshold in dB (negative)', (v) => parseFloat(v), -45)
+    .option('--start <sec>', 'Min leading silence to trim (seconds)', (v) => parseFloat(v), 0.05)
+    .option('--stop <sec>', 'Min trailing silence to trim (seconds)', (v) => parseFloat(v), 0.20)
+    .option('--suffix <text>', 'Suffix for outputs when not using --in-place', '_trimmed')
+    .option('--verbose', 'Verbose logging of the underlying ffmpeg command', false)
+    .addHelpText(
+      'after',
+      `
 Notes:
-  Bundled ffmpeg/ffprobe via ffmpeg-static and ffprobe-static.
-  MP3: libmp3lame (source bitrate if detectable; else VBR -q:a 2).
-  WAV: PCM (16/24/32-bit chosen to match source).
-  OGG: libvorbis (source bitrate if detectable; else VBR -q:a 5).
-`);
+  • MP3: libmp3lame (source bitrate if detectable; else VBR -q:a 2).
+  • WAV: PCM (16/24/32-bit chosen to match source).
+  • OGG: libvorbis (source bitrate if detectable; else VBR -q:a 5).
+`
+    )
+    .action(async (fileArg: string | undefined, opts: any) => {
+      const options: TrimOptions = {
+        thresholdDb: opts.threshold,
+        startSeconds: opts.start,
+        stopSeconds: opts.stop,
+        inPlace: !!opts.inPlace,
+        // Commander turns "--no-backup" into opts.backup === false
+        noBackup: opts.backup === false,
+        suffix: opts.suffix,
+        verbose: !!opts.verbose
+      };
+
+      if (!fileArg && !opts.all) {
+        program.help({ error: true });
+        return;
+      }
+
+      if (opts.all) {
+        const entries = await fs.readdir(process.cwd());
+        const targets = entries
+          .filter(f => SUPPORTED_EXTS.has(path.extname(f).toLowerCase()))
+          .map(f => path.join(process.cwd(), f));
+
+        if (targets.length === 0) {
+          console.log('No .mp3, .wav, or .ogg files found in current directory.');
+          return;
+        }
+
+        console.log(`Trimming silence from ${targets.length} file${targets.length === 1 ? '' : 's'}`);
+        console.log(
+          `threshold=${options.thresholdDb}dB, start>=${options.startSeconds}s, stop>=${options.stopSeconds}s` +
+          (options.inPlace
+            ? `, mode=in-place${options.noBackup ? ', no-backup' : ', with-backup'}`
+            : `, suffix='${options.suffix}'`)
+        );
+
+        let ok = 0, err = 0, skipped = 0;
+        for (const t of targets) {
+          const res = await trimFile(t, options);
+          const base = path.basename(t);
+          if (res.status === 'ok') {
+            ok++;
+            if (options.inPlace) console.log(`✓ ${base} (trimmed in-place)`);
+            else {
+              const p = path.parse(base);
+              console.log(`✓ ${base} -> ${p.name}${options.suffix}${p.ext}`);
+            }
+          } else if (res.status === 'skipped') {
+            skipped++;
+          } else {
+            err++;
+            console.error(`✗ ${base}`);
+          }
+        }
+
+        console.log(`\nDone. ok=${ok}, errors=${err}, skipped=${skipped}`);
+        if (options.inPlace && !options.noBackup) {
+          console.log('Backups created with .bak suffix next to originals.');
+        }
+      } else {
+        const input = path.resolve(fileArg as string);
+        const res = await trimFile(input, options);
+        if (res.status === 'ok') {
+          if (options.inPlace) console.log(`✓ Trimmed in-place: ${input}`);
+          else console.log(`✓ Wrote: ${res.outputPath}`);
+        } else if (res.status === 'skipped') {
+          console.log('Nothing to do.');
+          process.exitCode = 2;
+        } else {
+          console.error('Failed.');
+          process.exitCode = 3;
+        }
+      }
+    });
+
+  await program.parseAsync(process.argv);
 }

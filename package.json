@@ -42,7 +42,8 @@
   },
   "dependencies": {
     "ffmpeg-static": "^5.2.0",
-    "ffprobe-static": "^3.1.0"
+    "ffprobe-static": "^3.1.0",
+    "commander": "^11.0.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
