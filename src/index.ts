@@ -1,9 +1,9 @@
 import path from 'node:path';
+import type { Stats } from 'node:fs';
 import { spawn } from 'node:child_process';
 import ffprobeStatic from 'ffprobe-static';
 import ffmpegPathDefault from 'ffmpeg-static';
 import { promises as fs, existsSync } from 'node:fs';
-import type { Stats } from 'node:fs';
 
 // If you keep the ambient typings from earlier:
 //   declare module 'ffprobe-static' { const ffprobe: { path: string } | string; export default ffprobe; }
