@@ -36,14 +36,20 @@
     "node": ">=16.14"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "prepack": "npm run build",
-    "test": "node dist/bin/cli.js --help"
+    "lint": "eslint \"src/**/*.{ts,tsx}\"",
+    "lint:fix": "eslint \"src/**/*.{ts,tsx}\" --fix",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "build": "tsc -p tsconfig.json"
   },
   "dependencies": {
     "ffmpeg-static": "^5.2.0",
     "ffprobe-static": "^3.1.0",
-    "commander": "^11.0.0"
+    "commander": "^11.0.0",
+    "eslint": "^8.57.0",
+    "@typescript-eslint/eslint-plugin": "^7.18.0",
+    "@typescript-eslint/parser": "^7.18.0",
+    "typescript": "^5.5.0",
+    "@types/node": "^22.0.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
