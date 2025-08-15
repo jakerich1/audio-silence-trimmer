@@ -1,6 +1,7 @@
 {
   "name": "audio-silence-trimmer",
   "version": "1.2.0",
+  "license": "MIT",
   "description": "Trim leading and trailing silence from MP3, WAV, and OGG files using FFmpeg, with bundled ffmpeg/ffprobe binaries.",
   "type": "module",
   "bin": {
@@ -55,6 +56,5 @@
     "@types/node": "^22.0.0",
     "typescript": "^5.5.0"
   },
-  "license": "MIT",
   "author": "You"
 }
