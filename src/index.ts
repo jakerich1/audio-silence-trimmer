@@ -1,17 +1,16 @@
 import path from 'node:path';
-import { Command } from 'commander';
 import { spawn } from 'node:child_process';
 import ffprobeStatic from 'ffprobe-static';
 import ffmpegPathDefault from 'ffmpeg-static';
 import { promises as fs, existsSync } from 'node:fs';
+import type { Stats } from 'node:fs';
 
-const ffprobePath =
-  typeof ffprobeStatic === 'string'
-    ? ffprobeStatic
-    : (ffprobeStatic as any)?.path;
+// If you keep the ambient typings from earlier:
+//   declare module 'ffprobe-static' { const ffprobe: { path: string } | string; export default ffprobe; }
+const ffprobePath = typeof ffprobeStatic === 'string' ? ffprobeStatic : ffprobeStatic?.path ?? null;
 
-const ffmpegPath = ffmpegPathDefault || 'ffmpeg'; // fallback if a platform isn't supported
-const ffprobe = ffprobePath || 'ffprobe';
+const ffmpegPath: string = ffmpegPathDefault || 'ffmpeg'; // fallback if a platform isn't supported
+const ffprobe: string = ffprobePath || 'ffprobe';
 
 type TrimStatus = 'ok' | 'skipped' | 'error';
 
@@ -32,24 +31,24 @@ export interface TrimResult {
 
 const SUPPORTED_EXTS = new Set(['.mp3', '.wav', '.ogg']);
 
-// ---------------- core helpers ----------------
-
-function run(cmd: string, args: string[], opts: { cwd?: string } = {}): Promise<{ stdout: string; stderr: string }> {
+interface RunResult { stdout: string; stderr: string; }
+function run(cmd: string, args: string[], opts: { cwd?: string } = {}): Promise<RunResult> {
   return new Promise((resolve, reject) => {
     const p = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'], ...opts });
     let stdout = '';
     let stderr = '';
-    p.stdout?.on('data', d => (stdout += d.toString()));
-    p.stderr?.on('data', d => (stderr += d.toString()));
+
+    p.stdout?.on('data', (d: Buffer | string) => {
+      stdout += typeof d === 'string' ? d : d.toString('utf8');
+    });
+    p.stderr?.on('data', (d: Buffer | string) => {
+      stderr += typeof d === 'string' ? d : d.toString('utf8');
+    });
+
     p.on('error', reject);
     p.on('close', code => {
       if (code === 0) resolve({ stdout, stderr });
-      else {
-        const err = new Error(`${cmd} exited with code ${code}`);
-        (err as any).stdout = stdout;
-        (err as any).stderr = stderr;
-        reject(err);
-      }
+      else reject(new Error(`${cmd} exited with code ${code}`));
     });
   });
 }
@@ -63,18 +62,23 @@ async function getAudioStreamInfo(file: string): Promise<{ bitrateKbps: number |
       '-of', 'default=noprint_wrappers=1',
       file
     ]);
+
     let bitrateKbps: number | null = null;
     let bitsPerSample: number | null = null;
+
     for (const line of stdout.split(/\r?\n/)) {
-      const [k, v] = line.split('=');
+      if (!line) continue;
+      const [k = '', vRaw] = line.split('=');
+      const v: string = vRaw ?? '';
       if (k === 'bit_rate') {
-        const bps = parseInt(v, 10);
+        const bps = Number.parseInt(v, 10);
         if (Number.isFinite(bps) && bps > 0) bitrateKbps = Math.round(bps / 1000);
       } else if (k === 'bits_per_sample') {
-        const bps = parseInt(v, 10);
+        const bps = Number.parseInt(v, 10);
         if (Number.isFinite(bps) && bps > 0) bitsPerSample = bps;
       }
     }
+
     return { bitrateKbps, bitsPerSample };
   } catch {
     return { bitrateKbps: null, bitsPerSample: null };
@@ -87,45 +91,43 @@ function silenceremoveFilter(thresholdDb: number, startSec: number, stopSec: num
          `stop_periods=1:stop_duration=${stopSec}:stop_threshold=${thr}`;
 }
 
-function buildOutputPaths(inputPath: string, suffix: string, inPlace: boolean) {
+// Discriminated union so we never need casts.
+type OutputPaths =
+  | { kind: 'copy'; out: string }
+  | { kind: 'inPlace'; tmp: string; bak: string; final: string };
+
+function buildOutputPaths(inputPath: string, suffix: string, inPlace: boolean): OutputPaths {
   const dir = path.dirname(inputPath);
   const ext = path.extname(inputPath);
   const base = path.basename(inputPath, ext);
   if (inPlace) {
-    const tmp = path.join(dir, `${base}.__tmp_${Date.now()}${ext}`);
-    const bak = path.join(dir, `${base}.bak${ext}`);
-    return { tmp, bak, final: inputPath };
-  } else {
-    const out = path.join(dir, `${base}${suffix}${ext}`);
-    return { out };
+    return {
+      kind: 'inPlace',
+      tmp: path.join(dir, `${base}.__tmp_${Date.now()}${ext}`),
+      bak: path.join(dir, `${base}.bak${ext}`),
+      final: inputPath
+    };
   }
+  return { kind: 'copy', out: path.join(dir, `${base}${suffix}${ext}`) };
 }
 
 /** Pick appropriate output codec/settings per extension. */
-function codecArgsFor(ext: string, info: { bitrateKbps: number | null; bitsPerSample: number | null }): string[] {
+function codecArgsFor(
+  ext: string,
+  info: { bitrateKbps: number | null; bitsPerSample: number | null }
+): string[] {
   if (ext === '.mp3') {
-    if (info.bitrateKbps && Number.isFinite(info.bitrateKbps)) {
-      return ['-c:a', 'libmp3lame', '-b:a', `${info.bitrateKbps}k`];
-    }
-    return ['-c:a', 'libmp3lame', '-q:a', '2']; // high-quality VBR fallback
+    return info.bitrateKbps ? ['-c:a', 'libmp3lame', '-b:a', `${info.bitrateKbps}k`] : ['-c:a', 'libmp3lame', '-q:a', '2'];
   }
-
   if (ext === '.ogg') {
-    // Encode OGG Vorbis; keep bitrate if available, else use a solid VBR quality level.
-    if (info.bitrateKbps && Number.isFinite(info.bitrateKbps)) {
-      return ['-c:a', 'libvorbis', '-b:a', `${info.bitrateKbps}k`];
-    }
-    return ['-c:a', 'libvorbis', '-q:a', '5']; // ~160 kbps VBR target
+    return info.bitrateKbps ? ['-c:a', 'libvorbis', '-b:a', `${info.bitrateKbps}k`] : ['-c:a', 'libvorbis', '-q:a', '5'];
   }
-
   // WAV: keep PCM; choose bit depth close to source (default 16-bit if unknown)
   const bits = info.bitsPerSample ?? 16;
   if (bits >= 32) return ['-c:a', 'pcm_s32le'];
   if (bits >= 24) return ['-c:a', 'pcm_s24le'];
   return ['-c:a', 'pcm_s16le'];
 }
-
-// ---------------- public API ----------------
 
 export async function trimFile(inputPath: string, options: TrimOptions = {}): Promise<TrimResult> {
   const {
@@ -138,7 +140,12 @@ export async function trimFile(inputPath: string, options: TrimOptions = {}): Pr
     verbose = false
   } = options;
 
-  const stat = await fs.stat(inputPath).catch(() => null as any);
+  let stat: Stats | null = null;
+  try {
+    stat = await fs.stat(inputPath);
+  } catch {
+    stat = null;
+  }
   if (!stat || !stat.isFile()) return { status: 'skipped' };
 
   const ext = path.extname(inputPath).toLowerCase();
@@ -157,7 +164,7 @@ export async function trimFile(inputPath: string, options: TrimOptions = {}): Pr
     ...codec
   ];
 
-  const target = inPlace ? (paths as any).tmp : (paths as any).out;
+  const target = paths.kind === 'inPlace' ? paths.tmp : paths.out;
   args.push(target);
 
   if (verbose) {
@@ -167,42 +174,53 @@ export async function trimFile(inputPath: string, options: TrimOptions = {}): Pr
 
   try {
     await run(ffmpegPath, args);
-  } catch (err: any) {
-    if (verbose) console.error(`FFmpeg failed: ${err?.stderr || err?.message}`);
-    if (inPlace && existsSync((paths as any).tmp)) {
-      try { await fs.unlink((paths as any).tmp); } catch {}
+  } catch (err: unknown) {
+    if (verbose) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`FFmpeg failed: ${msg}`);
+    }
+    if (paths.kind === 'inPlace' && existsSync(paths.tmp)) {
+      try { await fs.unlink(paths.tmp); } catch (e: unknown) {
+        if (verbose) console.error(`Delete temp failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
     }
     return { status: 'error' };
   }
 
-  if (inPlace) {
+  if (paths.kind === 'inPlace') {
     if (!noBackup) {
-      try { await fs.rename(inputPath, (paths as any).bak); }
-      catch (e: any) {
-        if (verbose) console.error(`Backup failed: ${e.message}`);
-        try { await fs.unlink((paths as any).tmp); } catch {}
+      try { await fs.rename(inputPath, paths.bak); }
+      catch (e: unknown) {
+        if (verbose) console.error(`Backup failed: ${e instanceof Error ? e.message : String(e)}`);
+        try { await fs.unlink(paths.tmp); } catch (e: unknown) {
+            if (verbose) console.error(`Delete temp failed: ${e instanceof Error ? e.message : String(e)}`);
+        }
         return { status: 'error' };
       }
     } else {
-      try { await fs.unlink(inputPath); } catch (e: any) {
-        if (verbose) console.error(`Delete original failed: ${e.message}`);
-        try { await fs.unlink((paths as any).tmp); } catch {}
+      try { await fs.unlink(inputPath); } catch (e: unknown) {
+        if (verbose) console.error(`Delete original failed: ${e instanceof Error ? e.message : String(e)}`);
+        try { await fs.unlink(paths.tmp); } catch (e: unknown) {
+            if (verbose) console.error(`Delete temp failed: ${e instanceof Error ? e.message : String(e)}`);
+        }
         return { status: 'error' };
       }
     }
 
-    try { await fs.rename((paths as any).tmp, (paths as any).final); }
-    catch (e: any) {
-      if (verbose) console.error(`Finalize failed: ${e.message}`);
-      if (!noBackup && existsSync((paths as any).bak)) {
-        try { await fs.rename((paths as any).bak, inputPath); } catch {}
+    try { await fs.rename(paths.tmp, paths.final); }
+    catch (e: unknown) {
+      if (verbose) console.error(`Finalize failed: ${e instanceof Error ? e.message : String(e)}`);
+      if (!noBackup && existsSync(paths.bak)) {
+        try { await fs.rename(paths.bak, inputPath); } catch (e: unknown) {
+          if (verbose) console.error(`Restore backup failed: ${e instanceof Error ? e.message : String(e)}`);
+        }
       }
       return { status: 'error' };
     }
     return { status: 'ok', outputPath: inputPath };
   }
 
-  return { status: 'ok', outputPath: (paths as any).out };
+  return { status: 'ok', outputPath: paths.out };
 }
 
 export async function trimDirectory(dir: string, options: TrimOptions = {}): Promise<TrimResult[]> {
@@ -218,118 +236,179 @@ export async function trimDirectory(dir: string, options: TrimOptions = {}): Pro
   return results;
 }
 
-// ---------------- Commander CLI ----------------
+/** CLI support (used by src/bin/cli.ts) */
+export async function runCli(): Promise<void> {
+  const flags = parseCliArgs(process.argv.slice(2));
 
-async function getPackageVersion(): Promise<string> {
-  try {
-    const pkgRaw = await fs.readFile(new URL('../package.json', import.meta.url), 'utf8');
-    const pkg = JSON.parse(pkgRaw);
-    return pkg.version ?? '0.0.0';
-  } catch {
-    return '0.0.0';
+  if (flags.version) {
+    try {
+      const pkgRaw = await fs.readFile(new URL('../package.json', import.meta.url), 'utf8');
+      const pkg = JSON.parse(pkgRaw) as { version?: string };
+      console.log(pkg.version ?? '0.0.0');
+    } catch {
+      console.log('0.0.0');
+    }
+    return;
+  }
+
+  if (flags.help || (!flags.all && !flags.fileArg)) {
+    printHelp();
+    if (!flags.help) process.exitCode = 1;
+    return;
+  }
+
+  const options: TrimOptions = {
+    thresholdDb: flags.thresholdDb,
+    startSeconds: flags.startSeconds,
+    stopSeconds: flags.stopSeconds,
+    inPlace: flags.inPlace,
+    noBackup: flags.noBackup,
+    suffix: flags.suffix,
+    verbose: flags.verbose
+  };
+
+  if (flags.all) {
+    const entries = await fs.readdir(process.cwd());
+    const targets = entries
+      .filter(f => SUPPORTED_EXTS.has(path.extname(f).toLowerCase()))
+      .map(f => path.join(process.cwd(), f));
+
+    if (targets.length === 0) {
+      console.log('No .mp3, .wav, or .ogg files found in current directory.');
+      return;
+    }
+
+    console.log(`Trimming silence from ${targets.length} file${targets.length === 1 ? '' : 's'}`);
+    console.log(
+      `threshold=${options.thresholdDb}dB, start>=${options.startSeconds}s, stop>=${options.stopSeconds}s` +
+      (options.inPlace ? `, mode=in-place${options.noBackup ? ', no-backup' : ', with-backup'}` : `, suffix='${options.suffix}'`)
+    );
+
+    let ok = 0, err = 0, skipped = 0;
+    for (const t of targets) {
+      const res = await trimFile(t, options);
+      const base = path.basename(t);
+      if (res.status === 'ok') {
+        ok++;
+        if (options.inPlace) console.log(`✓ ${base} (trimmed in-place)`);
+        else {
+          const p = path.parse(base);
+          console.log(`✓ ${base} -> ${p.name}${options.suffix}${p.ext}`);
+        }
+      } else if (res.status === 'skipped') {
+        skipped++;
+      } else {
+        err++;
+        console.error(`✗ ${base}`);
+      }
+    }
+
+    console.log(`\nDone. ok=${ok}, errors=${err}, skipped=${skipped}`);
+    if (options.inPlace && !options.noBackup) {
+      console.log('Backups created with .bak suffix next to originals.');
+    }
+  } else {
+    const input = path.resolve(flags.fileArg as string);
+    const res = await trimFile(input, options);
+    if (res.status === 'ok') {
+      if (options.inPlace) console.log(`✓ Trimmed in-place: ${input}`);
+      else console.log(`✓ Wrote: ${res.outputPath}`);
+    } else if (res.status === 'skipped') {
+      console.log('Nothing to do.');
+      process.exitCode = 2;
+    } else {
+      console.error('Failed.');
+      process.exitCode = 3;
+    }
   }
 }
 
-/** CLI entry used by src/bin/cli.ts */
-export async function runCli(): Promise<void> {
-  const program = new Command();
+// ---- CLI parsing (typed) ----
 
-  program
-    .name('mp3-trim-silence') // keep this aligned with your package.json "bin" name
-    .description('Trim leading/trailing silence from MP3, WAV, and OGG files using FFmpeg.')
-    .version(await getPackageVersion(), '-v, --version', 'output the current version')
-    .argument('[file]', 'Path to a single .mp3/.wav/.ogg file to process')
-    .option('--all', 'Process all supported files in the current directory')
-    .option('--in-place', 'Overwrite originals (creates .bak backup unless --no-backup is set)')
-    .option('--no-backup', 'Skip creating .bak when using --in-place')
-    .option('--threshold <db>', 'Silence threshold in dB (negative)', (v) => parseFloat(v), -45)
-    .option('--start <sec>', 'Min leading silence to trim (seconds)', (v) => parseFloat(v), 0.05)
-    .option('--stop <sec>', 'Min trailing silence to trim (seconds)', (v) => parseFloat(v), 0.20)
-    .option('--suffix <text>', 'Suffix for outputs when not using --in-place', '_trimmed')
-    .option('--verbose', 'Verbose logging of the underlying ffmpeg command', false)
-    .addHelpText(
-      'after',
-      `
+interface CliFlags {
+  all: boolean;
+  inPlace: boolean;
+  noBackup: boolean;
+  thresholdDb: number;
+  startSeconds: number;
+  stopSeconds: number;
+  suffix: string;
+  verbose: boolean;
+  fileArg: string | null;
+  help: boolean;
+  version: boolean;
+}
+
+function parseNumber(val: string, fallback: number): number {
+  const n = Number(val);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function parseCliArgs(argv: string[]): CliFlags {
+  const flags: CliFlags = {
+    all: false,
+    inPlace: false,
+    noBackup: false,
+    thresholdDb: -45,
+    startSeconds: 0.05,
+    stopSeconds: 0.20,
+    suffix: '_trimmed',
+    verbose: false,
+    fileArg: null,
+    help: false,
+    version: false
+  };
+
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+
+    if (a === '--help' || a === '-h') flags.help = true;
+    else if (a === '--version' || a === '-v') flags.version = true;
+    else if (a === '--all') flags.all = true;
+    else if (a === '--in-place') flags.inPlace = true;
+    else if (a === '--no-backup') flags.noBackup = true;
+    else if (a === '--verbose') flags.verbose = true;
+    else if (a === '--threshold') flags.thresholdDb = parseNumber(argv[++i] ?? '', flags.thresholdDb);
+    else if (a?.startsWith('--threshold=')) flags.thresholdDb = parseNumber(a.split('=')[1] ?? "", flags.thresholdDb);
+    else if (a === '--start') flags.startSeconds = parseNumber(argv[++i] ?? '', flags.startSeconds);
+    else if (a?.startsWith('--start=')) flags.startSeconds = parseNumber(a.split('=')[1] ?? "", flags.startSeconds);
+    else if (a === '--stop') flags.stopSeconds = parseNumber(argv[++i] ?? '', flags.stopSeconds);
+    else if (a?.startsWith('--stop=')) flags.stopSeconds = parseNumber(a.split('=')[1] ?? "", flags.stopSeconds);
+    else if (a === '--suffix') flags.suffix = argv[++i] ?? flags.suffix;
+    else if (!a?.startsWith('--') && !flags.fileArg) flags.fileArg = a ?? null;
+  }
+
+  return flags;
+}
+
+function printHelp(): void {
+  console.log(`
+audio-trim-silence — Trim leading/trailing silence from MP3, WAV, and OGG files
+
+Usage:
+  audio-trim-silence "file.mp3"
+  audio-trim-silence "file.wav"
+  audio-trim-silence "file.ogg"
+  audio-trim-silence --all
+  audio-trim-silence --all --in-place [--no-backup]
+  audio-trim-silence "file.mp3" --threshold -45 --start 0.05 --stop 0.20
+
+Options:
+  --all            Process all .mp3/.wav/.ogg files in current directory
+  --in-place       Overwrite originals (creates .bak backup unless --no-backup)
+  --no-backup      Skip creating .bak when using --in-place
+  --threshold N    Silence threshold in dB (negative). Default: -45
+  --start SEC      Min leading silence to trim (seconds). Default: 0.05
+  --stop SEC       Min trailing silence to trim (seconds). Default: 0.20
+  --suffix TEXT    Suffix for outputs when not in-place. Default: _trimmed
+  --verbose        Verbose logging
+  -h, --help       Show this help
+  -v, --version    Print version
+
 Notes:
-  • MP3: libmp3lame (source bitrate if detectable; else VBR -q:a 2).
-  • WAV: PCM (16/24/32-bit chosen to match source).
-  • OGG: libvorbis (source bitrate if detectable; else VBR -q:a 5).
-`
-    )
-    .action(async (fileArg: string | undefined, opts: any) => {
-      const options: TrimOptions = {
-        thresholdDb: opts.threshold,
-        startSeconds: opts.start,
-        stopSeconds: opts.stop,
-        inPlace: !!opts.inPlace,
-        // Commander turns "--no-backup" into opts.backup === false
-        noBackup: opts.backup === false,
-        suffix: opts.suffix,
-        verbose: !!opts.verbose
-      };
-
-      if (!fileArg && !opts.all) {
-        program.help({ error: true });
-        return;
-      }
-
-      if (opts.all) {
-        const entries = await fs.readdir(process.cwd());
-        const targets = entries
-          .filter(f => SUPPORTED_EXTS.has(path.extname(f).toLowerCase()))
-          .map(f => path.join(process.cwd(), f));
-
-        if (targets.length === 0) {
-          console.log('No .mp3, .wav, or .ogg files found in current directory.');
-          return;
-        }
-
-        console.log(`Trimming silence from ${targets.length} file${targets.length === 1 ? '' : 's'}`);
-        console.log(
-          `threshold=${options.thresholdDb}dB, start>=${options.startSeconds}s, stop>=${options.stopSeconds}s` +
-          (options.inPlace
-            ? `, mode=in-place${options.noBackup ? ', no-backup' : ', with-backup'}`
-            : `, suffix='${options.suffix}'`)
-        );
-
-        let ok = 0, err = 0, skipped = 0;
-        for (const t of targets) {
-          const res = await trimFile(t, options);
-          const base = path.basename(t);
-          if (res.status === 'ok') {
-            ok++;
-            if (options.inPlace) console.log(`✓ ${base} (trimmed in-place)`);
-            else {
-              const p = path.parse(base);
-              console.log(`✓ ${base} -> ${p.name}${options.suffix}${p.ext}`);
-            }
-          } else if (res.status === 'skipped') {
-            skipped++;
-          } else {
-            err++;
-            console.error(`✗ ${base}`);
-          }
-        }
-
-        console.log(`\nDone. ok=${ok}, errors=${err}, skipped=${skipped}`);
-        if (options.inPlace && !options.noBackup) {
-          console.log('Backups created with .bak suffix next to originals.');
-        }
-      } else {
-        const input = path.resolve(fileArg as string);
-        const res = await trimFile(input, options);
-        if (res.status === 'ok') {
-          if (options.inPlace) console.log(`✓ Trimmed in-place: ${input}`);
-          else console.log(`✓ Wrote: ${res.outputPath}`);
-        } else if (res.status === 'skipped') {
-          console.log('Nothing to do.');
-          process.exitCode = 2;
-        } else {
-          console.error('Failed.');
-          process.exitCode = 3;
-        }
-      }
-    });
-
-  await program.parseAsync(process.argv);
+  Bundled ffmpeg/ffprobe via ffmpeg-static and ffprobe-static.
+  MP3: libmp3lame (source bitrate if detectable; else VBR -q:a 2).
+  WAV: PCM (16/24/32-bit chosen to match source).
+  OGG: libvorbis (source bitrate if detectable; else VBR -q:a 5).
+`);
 }
