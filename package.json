@@ -1,0 +1,53 @@
+{
+  "name": "audio-silence-trimmer",
+  "version": "1.2.0",
+  "description": "Trim leading and trailing silence from MP3, WAV, and OGG files using FFmpeg, with bundled ffmpeg/ffprobe binaries.",
+  "type": "module",
+  "bin": {
+    "audio-trim-silence": "dist/bin/cli.js"
+  },
+  "main": "dist/index.js",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "mp3",
+    "wav",
+    "ogg",
+    "vorbis",
+    "audio",
+    "ffmpeg",
+    "ffprobe",
+    "silence",
+    "trim",
+    "cli",
+    "typescript"
+  ],
+  "engines": {
+    "node": ">=16.14"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "prepack": "npm run build",
+    "test": "node dist/bin/cli.js --help"
+  },
+  "dependencies": {
+    "ffmpeg-static": "^5.2.0",
+    "ffprobe-static": "^3.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.5.0"
+  },
+  "license": "MIT",
+  "author": "You"
+}

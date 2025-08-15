@@ -1,0 +1,7 @@
+/node_modules
+/dist
+npm-debug.log*
+.DS_Store
+*.bak.mp3
+*.bak.wav
+*.bak.ogg
