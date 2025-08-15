@@ -337,15 +337,15 @@ function parseCliArgs(argv: string[]) {
 
 function printHelp() {
   console.log(`
-mp3-trim-silence — Trim leading/trailing silence from MP3, WAV, and OGG files
+audio-trim-silence — Trim leading/trailing silence from MP3, WAV, and OGG files
 
 Usage:
-  mp3-trim-silence "file.mp3"
-  mp3-trim-silence "file.wav"
-  mp3-trim-silence "file.ogg"
-  mp3-trim-silence --all
-  mp3-trim-silence --all --in-place [--no-backup]
-  mp3-trim-silence "file.mp3" --threshold -45 --start 0.05 --stop 0.20
+  audio-trim-silence "file.mp3"
+  audio-trim-silence "file.wav"
+  audio-trim-silence "file.ogg"
+  audio-trim-silence --all
+  audio-trim-silence --all --in-place [--no-backup]
+  audio-trim-silence "file.mp3" --threshold -45 --start 0.05 --stop 0.20
 
 Options:
   --all            Process all .mp3/.wav/.ogg files in current directory
